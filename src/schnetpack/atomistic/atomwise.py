@@ -362,11 +362,11 @@ class AtomisticMagneticDipoleMoment(nn.Module):
             n_hidden: Optional[Union[int, Sequence[int]]] = None,
             n_layers: int = 2,
             activation: Callable = F.silu,
-            predict_magnitude: bool = False,
-            return_charges: bool = False,
-            dipole_key: str = "magnetic_dipole_moment",
-            charges_key: str = "current_density", # maybe a derivative similar to partial charges?
-            correct_charges: bool = False, # Delete this later?
+            return_latent_magnetic_charges: bool = True,
+            use_dipole_moment_charges: bool = False,
+            dipole_moment_charges_key: str = properties.partial_charges,
+            magnetic_dipole_key: str = "magnetic_dipole_moment",
+            latent_magnetic_charges_key: str = "latent_magnetic_charges",
     ):  #TODO: Fix Docstrings
         """
         Args:
@@ -379,27 +379,29 @@ class AtomisticMagneticDipoleMoment(nn.Module):
             n_layers: number of layers.
             activation: activation function
             predict_magnitude: If true, calculate magnitude of dipole
-            return_charges: If true, return latent partial charges
-            dipole_key: the key under which the dipoles will be stored
-            charges_key: the key under which partial charges will be stored
+            return_latent_magnetic_charges: If true, return latent partial charges
+            magnetic_dipole_key: the key under which the dipoles will be stored
+            latent_magnetic_charges_key: the key under which partial charges will be stored
             correct_charges: If true, forces the sum of partial charges to be the total
                 charge, if provided, and zero otherwise.
                 local, atomic dipoles.
         """
         super().__init__()
 
-        self.dipole_key = dipole_key
-        self.charges_key = charges_key
-        self.return_charges = return_charges
-        self.model_outputs = [dipole_key]
-        if self.return_charges:
-            self.model_outputs.append(charges_key)
+        self.magnetic_dipole_key = magnetic_dipole_key
+        self.latent_magnetic_charges_key = latent_magnetic_charges_key
+        self.return_latent_magnetic_charges = return_latent_magnetic_charges
+        self.model_outputs = [magnetic_dipole_key]
+        self.use_dipole_moment_charges = use_dipole_moment_charges
+        self.dipole_moment_charges_key = dipole_moment_charges_key
+        if self.return_latent_magnetic_charges:
+            self.model_outputs.append(latent_magnetic_charges_key)
 
-        self.predict_magnitude = predict_magnitude
-        self.correct_charges = correct_charges
+        # Possibly include later, similar to DipoleMoment, if issues with charged molecules arise
+        # self.correct_charges = correct_charges
 
-        # we'll always need vector representation for magnetic dipole moment, as the magnetic dipole moment can be
-        # calculated as the cross product of the position vector and the electric current density
+        # we'll always need vector representation for the magnetic dipole moment, as we want atomwise magnetic
+        # dipole moments
         self.outnet = spk.nn.build_gated_equivariant_mlp(
             n_in=n_in,
             n_out=1,
@@ -417,35 +419,24 @@ class AtomisticMagneticDipoleMoment(nn.Module):
         maxm = int(idx_m[-1]) + 1
 
         l1 = inputs["vector_representation"]
-        _, electric_current_density = self.outnet((l0, l1))
+        q, electric_current_density = self.outnet((l0, l1))
         electric_current_density = torch.squeeze(electric_current_density, -1)
 
-    #    if self.correct_charges:
-    #        sum_charge = snn.scatter_add(charges, idx_m, dim_size=maxm)
-    #
-    #        if properties.total_charge in inputs:
-    #            total_charge = inputs[properties.total_charge][:, None]
-    #        else:
-    #            total_charge = torch.zeros_like(sum_charge)
-    #
-    #        charge_correction = (total_charge - sum_charge) / natoms.unsqueeze(-1)
-    #        charge_correction = charge_correction[idx_m]
-    #        charges = charges + charge_correction
+        if self.use_dipole_moment_charges:
+            charges = inputs[self.dipole_moment_charges_key]
+        else:
+            charges = torch.ones_like(q)
 
-        if self.return_charges:
-            inputs[self.charges_key] = electric_current_density
+        if self.return_latent_magnetic_charges:
+            inputs[self.latent_magnetic_charges_key] = q
 
-        y = torch.cross(positions, electric_current_density)
-        # if self.use_vector_representation:
-        #    y = y + electric_current_density
+        # if results not good, try multiplying "electric_current_density" inside the cross product or adding
+        # "electric_current_density" to the result of the product.
+        # also try omitting q and only working with "electric_current_density"
+        velocities = inputs['velocity']
+        y = q * charges * electric_current_density * torch.cross(positions, velocities)
 
-        # sum over atoms
-        #y = snn.scatter_add(y, idx_m, dim_size=maxm)
-
-        #if self.predict_magnitude:
-        #    y = torch.norm(y, dim=1, keepdim=False)
-
-        inputs[self.dipole_key] = y
+        inputs[self.magnetic_dipole_key] = y
         return inputs
 
 
