@@ -8,7 +8,13 @@ import schnetpack as spk
 import schnetpack.nn as snn
 import schnetpack.properties as properties
 
-__all__ = ["Atomwise", "DipoleMoment", "Polarizability", "AtomisticDipoleMoment", "AtomisticMagneticDipoleMoment"]
+__all__ = ["Atomwise", "DipoleMoment", "Polarizability", "AtomisticDipoleMoment", "AtomisticMagneticDipoleMoment",
+           "AtomisticMagneticDipoleMomentDependent"]
+
+
+# TODO: Find better way or permanently implement the best function. This is just for testing purposes.
+def default_forward_function(q, charges, electric_current_density, positions, velocities):
+    return q * charges * electric_current_density * torch.cross(positions, velocities)
 
 
 class Atomwise(nn.Module):
@@ -367,6 +373,7 @@ class AtomisticMagneticDipoleMoment(nn.Module):
             dipole_moment_charges_key: str = properties.partial_charges,
             magnetic_dipole_key: str = "magnetic_dipole_moment",
             latent_magnetic_charges_key: str = "latent_magnetic_charges",
+            forward_function: Callable = None,
     ):  #TODO: Fix Docstrings
         """
         Args:
@@ -394,6 +401,12 @@ class AtomisticMagneticDipoleMoment(nn.Module):
         self.model_outputs = [magnetic_dipole_key]
         self.use_dipole_moment_charges = use_dipole_moment_charges
         self.dipole_moment_charges_key = dipole_moment_charges_key
+
+        if forward_function and callable(forward_function):
+            self.forward_function = forward_function
+        else:
+            self.forward_function = default_forward_function
+
         if self.return_latent_magnetic_charges:
             self.model_outputs.append(latent_magnetic_charges_key)
 
@@ -434,7 +447,115 @@ class AtomisticMagneticDipoleMoment(nn.Module):
         # "electric_current_density" to the result of the product.
         # also try omitting q and only working with "electric_current_density"
         velocities = inputs['velocity']
-        y = q * charges * electric_current_density * torch.cross(positions, velocities)
+
+        y = self.forward_function(q, charges, electric_current_density, positions, velocities)
+
+        inputs[self.magnetic_dipole_key] = y
+        return inputs
+
+
+class AtomisticMagneticDipoleMomentDependent(nn.Module):
+    """
+    Predicts dipole moments from latent partial charges and (optionally) local, atomic dipoles.
+    The latter requires a representation supplying (equivariant) vector features.
+
+    References:
+
+    .. [#painn1] Schütt, Unke, Gastegger.
+       Equivariant message passing for the prediction of tensorial properties and molecular spectra.
+       ICML 2021, http://proceedings.mlr.press/v139/schutt21a.html
+    .. [#irspec] Gastegger, Behler, Marquetand.
+       Machine learning molecular dynamics for the simulation of infrared spectra.
+       Chemical science 8.10 (2017): 6924-6935.
+    .. [#dipole] Veit et al.
+       Predicting molecular dipole moments by combining atomic partial charges and atomic dipoles.
+       The Journal of Chemical Physics 153.2 (2020): 024113.
+    """
+
+    def __init__(
+            self,
+            n_in: int,
+            n_hidden: Optional[Union[int, Sequence[int]]] = None,
+            n_layers: int = 2,
+            activation: Callable = F.silu,
+            return_latent_magnetic_charges: bool = True,
+            use_dipole_moment_charges: bool = False,
+            dipole_moment_key: str = properties.dipole_moment,
+            dipole_moment_charges_key: str = properties.partial_charges,
+            magnetic_dipole_key: str = "magnetic_dipole_moment",
+            latent_magnetic_charges_key: str = "latent_magnetic_charges",
+    ):  #TODO: Fix Docstrings
+        """
+        Args:
+            n_in: input dimension of representation
+            n_hidden: size of hidden layers.
+                If an integer, same number of node is used for all hidden layers
+                resulting in a rectangular network.
+                If None, the number of neurons is divided by two after each layer
+                starting n_in resulting in a pyramidal network.
+            n_layers: number of layers.
+            activation: activation function
+            predict_magnitude: If true, calculate magnitude of dipole
+            return_latent_magnetic_charges: If true, return latent partial charges
+            magnetic_dipole_key: the key under which the dipoles will be stored
+            latent_magnetic_charges_key: the key under which partial charges will be stored
+            correct_charges: If true, forces the sum of partial charges to be the total
+                charge, if provided, and zero otherwise.
+                local, atomic dipoles.
+        """
+        super().__init__()
+
+        self.magnetic_dipole_key = magnetic_dipole_key
+        self.latent_magnetic_charges_key = latent_magnetic_charges_key
+        self.return_latent_magnetic_charges = return_latent_magnetic_charges
+        self.model_outputs = [magnetic_dipole_key]
+        self.use_dipole_moment_charges = use_dipole_moment_charges
+        self.dipole_moment_charges_key = dipole_moment_charges_key
+        self.dipole_moment_key = dipole_moment_key
+
+        if self.return_latent_magnetic_charges:
+            self.model_outputs.append(latent_magnetic_charges_key)
+
+        # Possibly include later, similar to DipoleMoment, if issues with charged molecules arise
+        # self.correct_charges = correct_charges
+
+        # we'll always need vector representation for the magnetic dipole moment, as we want atomwise magnetic
+        # dipole moments
+        self.outnet = spk.nn.build_gated_equivariant_mlp(
+            n_in=n_in,
+            n_out=1,
+            n_hidden=n_hidden,
+            n_layers=n_layers,
+            activation=activation,
+            sactivation=activation,
+        )
+
+    def forward(self, inputs):
+        positions = inputs[properties.R]
+        l0 = inputs["scalar_representation"]
+        natoms = inputs[properties.n_atoms]
+        idx_m = inputs[properties.idx_m]
+        maxm = int(idx_m[-1]) + 1
+
+        l1 = inputs["vector_representation"]
+        q, electric_current_density = self.outnet((l0, l1))
+        electric_current_density = torch.squeeze(electric_current_density, -1)
+
+        if self.use_dipole_moment_charges:
+            charges = inputs[self.dipole_moment_charges_key]
+        else:
+            charges = torch.ones_like(q)
+
+        if self.return_latent_magnetic_charges:
+            inputs[self.latent_magnetic_charges_key] = q
+
+        # if results not good, try multiplying "electric_current_density" inside the cross product or adding
+        # "electric_current_density" to the result of the product.
+        # also try omitting q and only working with "electric_current_density"
+        velocities = inputs['velocity']
+        dipole_moment = inputs[self.dipole_moment_key]
+
+        y = q * torch.cross(dipole_moment, velocities) + electric_current_density
 
         inputs[self.magnetic_dipole_key] = y
         return inputs
