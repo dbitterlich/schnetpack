@@ -373,6 +373,7 @@ class AtomisticMagneticDipoleMoment(nn.Module):
             dipole_moment_charges_key: str = properties.partial_charges,
             magnetic_dipole_key: str = "magnetic_dipole_moment",
             latent_magnetic_charges_key: str = "latent_magnetic_charges",
+            return_latent_vectorial = True,
             forward_function: Callable = None,
     ):  #TODO: Fix Docstrings
         """
@@ -401,6 +402,7 @@ class AtomisticMagneticDipoleMoment(nn.Module):
         self.model_outputs = [magnetic_dipole_key]
         self.use_dipole_moment_charges = use_dipole_moment_charges
         self.dipole_moment_charges_key = dipole_moment_charges_key
+        self.return_latent_vectorial = return_latent_vectorial
 
         if forward_function and callable(forward_function):
             self.forward_function = forward_function
@@ -409,6 +411,9 @@ class AtomisticMagneticDipoleMoment(nn.Module):
 
         if self.return_latent_magnetic_charges:
             self.model_outputs.append(latent_magnetic_charges_key)
+
+        if self.return_latent_vectorial:
+            self.model_outputs.append("magnetic_latent_vectorial")
 
         # Possibly include later, similar to DipoleMoment, if issues with charged molecules arise
         # self.correct_charges = correct_charges
@@ -443,11 +448,15 @@ class AtomisticMagneticDipoleMoment(nn.Module):
         if self.return_latent_magnetic_charges:
             inputs[self.latent_magnetic_charges_key] = q
 
+        if self.return_latent_vectorial:
+            inputs["magnetic_latent_vectorial"] = electric_current_density
+
         # if results not good, try multiplying "electric_current_density" inside the cross product or adding
         # "electric_current_density" to the result of the product.
         # also try omitting q and only working with "electric_current_density"
         velocities = inputs['velocity']
 
+        # try functions with scaling factor 1/(2c) following Yang2009
         y = self.forward_function(q, charges, electric_current_density, positions, velocities)
 
         inputs[self.magnetic_dipole_key] = y
