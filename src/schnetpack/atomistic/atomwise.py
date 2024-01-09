@@ -374,6 +374,7 @@ class AtomisticMagneticDipoleMoment(nn.Module):
             magnetic_dipole_key: str = "magnetic_dipole_moment",
             latent_magnetic_charges_key: str = "latent_magnetic_charges",
             return_latent_vectorial = True,
+            output_average_latent_magnetic_charges: bool = True,
             forward_function: Callable = None,
     ):  #TODO: Fix Docstrings
         """
@@ -403,6 +404,7 @@ class AtomisticMagneticDipoleMoment(nn.Module):
         self.use_dipole_moment_charges = use_dipole_moment_charges
         self.dipole_moment_charges_key = dipole_moment_charges_key
         self.return_latent_vectorial = return_latent_vectorial
+        self.output_average_latent_magnetic_charges = output_average_latent_magnetic_charges
 
         if forward_function and callable(forward_function):
             self.forward_function = forward_function
@@ -412,8 +414,11 @@ class AtomisticMagneticDipoleMoment(nn.Module):
         if self.return_latent_magnetic_charges:
             self.model_outputs.append(latent_magnetic_charges_key)
 
-        if self.return_latent_vectorial:
+        if hasattr(self, "return_latent_vectorial") and self.return_latent_vectorial:
             self.model_outputs.append("magnetic_latent_vectorial")
+
+        if hasattr(self, "output_average_latent_magnetic_charges") and self.output_average_latent_magnetic_charges:
+            self.model_outputs.append("average_latent_magnetic_charges")
 
         # Possibly include later, similar to DipoleMoment, if issues with charged molecules arise
         # self.correct_charges = correct_charges
@@ -447,6 +452,9 @@ class AtomisticMagneticDipoleMoment(nn.Module):
 
         if self.return_latent_magnetic_charges:
             inputs[self.latent_magnetic_charges_key] = q
+
+        if self.output_average_latent_magnetic_charges:
+            inputs["average_latent_magnetic_charges"] = torch.mean(q)*torch.ones_like(q)
 
         if self.return_latent_vectorial:
             inputs["magnetic_latent_vectorial"] = electric_current_density
